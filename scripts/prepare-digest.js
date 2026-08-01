@@ -30,6 +30,10 @@ const FEED_X_URL = 'https://raw.githubusercontent.com/zarazhangrui/follow-builde
 const FEED_PODCASTS_URL = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json';
 const FEED_BLOGS_URL = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-blogs.json';
 
+// Local fallback — if remote GitHub raw is unreachable (common in CN),
+// use the feed files shipped with the repo (updated on git pull).
+const LOCAL_FEEDS_DIR = join(decodeURIComponent(new URL('.', import.meta.url).pathname), '..');
+
 const PROMPTS_BASE = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/prompts';
 const PROMPT_FILES = [
   'summarize-podcast.md',
@@ -42,15 +46,25 @@ const PROMPT_FILES = [
 // -- Fetch helpers -----------------------------------------------------------
 
 async function fetchJSON(url) {
-  const res = await fetch(url);
-  if (!res.ok) return null;
-  return res.json();
+  try {
+    const ctrl = new AbortController();
+    const id = setTimeout(() => ctrl.abort(), 8000);
+    const res = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(id);
+    if (!res.ok) return null;
+    return res.json();
+  } catch { return null; }
 }
 
 async function fetchText(url) {
-  const res = await fetch(url);
-  if (!res.ok) return null;
-  return res.text();
+  try {
+    const ctrl = new AbortController();
+    const id = setTimeout(() => ctrl.abort(), 8000);
+    const res = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(id);
+    if (!res.ok) return null;
+    return res.text();
+  } catch { return null; }
 }
 
 // -- Main --------------------------------------------------------------------
@@ -72,16 +86,31 @@ async function main() {
     }
   }
 
-  // 2. Fetch all three feeds
-  const [feedX, feedPodcasts, feedBlogs] = await Promise.all([
-    fetchJSON(FEED_X_URL),
-    fetchJSON(FEED_PODCASTS_URL),
-    fetchJSON(FEED_BLOGS_URL)
-  ]);
+  // 2. Fetch all three feeds (with local fallback)
+  const feedFiles = ['feed-x.json', 'feed-podcasts.json', 'feed-blogs.json'];
+  const feedUrls = [FEED_X_URL, FEED_PODCASTS_URL, FEED_BLOGS_URL];
 
-  if (!feedX) errors.push('Could not fetch tweet feed');
-  if (!feedPodcasts) errors.push('Could not fetch podcast feed');
-  if (!feedBlogs) errors.push('Could not fetch blog feed');
+  const remoteFeeds = await Promise.all(feedUrls.map(url => {
+    // Wrap each fetch with a timeout so one slow remote doesn't block the
+    // rest — let the local fallback handle it if the remote times out.
+    return fetchJSON(url);
+  }));
+
+  async function localFeed(filename) {
+    try {
+      const p = join(LOCAL_FEEDS_DIR, filename);
+      if (existsSync(p)) return JSON.parse(await readFile(p, 'utf-8'));
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  const [feedX, feedPodcasts, feedBlogs] = await Promise.all(
+    remoteFeeds.map((r, i) => r ?? localFeed(feedFiles[i]))
+  );
+
+  if (!feedX) errors.push('Could not fetch tweet feed (remote + local)');
+  if (!feedPodcasts) errors.push('Could not fetch podcast feed (remote + local)');
+  if (!feedBlogs) errors.push('Could not fetch blog feed (remote + local)');
   if (feedX?.errors?.length) {
     errors.push(
       ...feedX.errors.map((error) => `Tweet feed problem: ${error}`)
